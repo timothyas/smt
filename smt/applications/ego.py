@@ -156,7 +156,7 @@ class EGO(SurrogateBasedApplication):
         rsl = list(rs.get_state())
         rsl[1] = rsl[1].tolist()
         progress = {
-                "iteration"     : int(k+1), # write the number of completed iterations (starts with 0)
+                "iteration"     : int(k),
                 "x_data"        : x_data.tolist(),
                 "y_data"        : y_data.tolist(),
                 "random_state"  : rsl}
@@ -227,7 +227,7 @@ class EGO(SurrogateBasedApplication):
             y_data[-n_parallel:] = y
 
             # Save progress
-            self.write_to_yaml(k, x_data, y_data)
+            self.write_to_yaml(k+1, x_data, y_data)
 
         # Find the optimal point
         ind_best = np.argmin(y_data if y_data.ndim == 1 else y_data[:, 0])
