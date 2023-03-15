@@ -5,7 +5,9 @@ This package is distributed under New BSD license.
 
 """
 
+import os
 import numpy as np
+import yaml
 
 from types import FunctionType
 
@@ -116,6 +118,52 @@ class EGO(SurrogateBasedApplication):
             types=(type(None), int, np.random.RandomState),
             desc="Numpy RandomState object or seed number which controls random draws",
         )
+        self.options.declare(
+            "pickup_file",
+            types=(type(None), str),
+            desc="Name of pickup file, if None, don't write anything"
+        )
+
+
+    def read_from_yaml(self):
+
+        # If pickup file does not exist, start from scratch
+        if self.options["pickup_file"] is None:
+            return 0, None, None
+        elif not os.path.isfile(self.options["pickup_file"]):
+            return 0, None, None
+
+        # Otherwise, pick back up
+        with open(self.options["pickup_file"], "r") as f:
+            progress = yaml.safe_load(f)
+
+        # Re-Create a RandomState object, set it to last state
+        rs = np.random.RandomState(self.options["random_state"])
+        rsl = progress["random_state"]
+        rsl[1] = np.array(rsl[1], dtype=rs.get_state()[1].dtype)
+        rs.set_state(tuple(rsl))
+        self.options["random_state"] = rs
+        self._sampling._sampling_method.random_state = rs
+        return progress["iteration"], np.array(progress["x_data"]), np.array(progress["y_data"])
+
+
+    def write_to_yaml(self, k, x_data, y_data):
+
+        if self.options["pickup_file"] is None:
+            return
+
+        rs = self._sampling._sampling_method.random_state
+        rsl = list(rs.get_state())
+        rsl[1] = rsl[1].tolist()
+        progress = {
+                "iteration"     : int(k+1), # write the number of completed iterations (starts with 0)
+                "x_data"        : x_data.tolist(),
+                "y_data"        : y_data.tolist(),
+                "random_state"  : rsl}
+        with open(self.options["pickup_file"], "w") as f:
+            yaml.dump(progress, stream=f)
+        return
+
 
     def optimize(self, fun):
         """
@@ -135,11 +183,11 @@ class EGO(SurrogateBasedApplication):
         [ndoe + n_iter, nx]: coord-x data
         [ndoe + n_iter, 1]: coord-y data
         """
-        x_data, y_data = self._setup_optimizer(fun)
+        start, x_data, y_data = self._setup_optimizer(fun)
         n_iter = self.options["n_iter"]
         n_parallel = self.options["n_parallel"]
 
-        for k in range(n_iter):
+        for k in range(start, n_iter):
 
             # Virtual enrichement loop
             for p in range(n_parallel):
@@ -177,6 +225,9 @@ class EGO(SurrogateBasedApplication):
                 x_to_compute = self.mixint.fold_with_enum_index(x_to_compute)
             y = self._evaluator.run(fun, x_to_compute)
             y_data[-n_parallel:] = y
+
+            # Save progress
+            self.write_to_yaml(k, x_data, y_data)
 
         # Find the optimal point
         ind_best = np.argmin(y_data if y_data.ndim == 1 else y_data[:, 0])
@@ -286,24 +337,34 @@ class EGO(SurrogateBasedApplication):
             self.categorical_kernel = None
         # Build DOE
         self._evaluator = self.options["evaluator"]
-        xdoe = self.options["xdoe"]
-        if xdoe is None:
-            self.log("Build initial DOE with LHS")
-            n_doe = self.options["n_doe"]
-            x_doe = self._sampling(n_doe)
-        else:
-            self.log("Initial DOE given")
-            x_doe = np.atleast_2d(xdoe)
-            if self.mixint and not (self.work_in_folded_space):
-                x_doe = self.mixint.unfold_with_enum_mask(x_doe)
 
-        ydoe = self.options["ydoe"]
-        if ydoe is None:
-            y_doe = self._evaluator.run(fun, x_doe)
-        else:  # to save time if y_doe is already given to EGO
-            y_doe = ydoe
+        # Look for a pickup file first
+        iteration, x_doe, y_doe = self.read_from_yaml()
 
-        return x_doe, y_doe
+        if iteration == 0:
+            xdoe = self.options["xdoe"]
+            if xdoe is None:
+                self.log("Build initial DOE with LHS")
+                n_doe = self.options["n_doe"]
+                x_doe = self._sampling(n_doe)
+            else:
+                self.log("Initial DOE given")
+                x_doe = np.atleast_2d(xdoe)
+                if self.mixint and not (self.work_in_folded_space):
+                    x_doe = self.mixint.unfold_with_enum_mask(x_doe)
+
+            ydoe = self.options["ydoe"]
+            if ydoe is None:
+                self.log("Evaluate initial DOE with LHS")
+                y_doe = self._evaluator.run(fun, x_doe)
+            else:  # to save time if y_doe is already given to EGO
+                self.log("Initial DOE evaluation given")
+                y_doe = ydoe
+
+            # Might as well save this
+            self.write_to_yaml(iteration, x_doe, y_doe)
+
+        return iteration, x_doe, y_doe
 
     def _train_gpr(self, x_data, y_data):
         self.gpr.set_training_values(x_data, y_data)
